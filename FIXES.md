@@ -174,6 +174,85 @@ Expected response: `"I can only answer questions about the uploaded documents."`
 
 ---
 
+## Fix #4 — Hide Exception Details from Client
+**Date**: 2025  
+**OWASP**: A05:2021 — Security Misconfiguration  
+**Severity**: 🟠 Medium  
+**Commit**: `563448a`
+
+### What was the problem?
+When an unhandled exception occurred during a query, the raw Python exception message was returned directly to the client in the HTTP 500 response body. This could expose internal file paths, ChromaDB internals, or Groq API error details to an attacker.
+
+### What was changed?
+
+**`main.py`:**
+- Replaced `raise HTTPException(status_code=500, detail=f"Query error: {exc}")` with a generic message:
+```python
+raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+```
+- The full exception is still logged server-side via `logger.exception("Query failed")` — nothing is lost for debugging
+
+### How to verify?
+Trigger a server error (e.g. send a malformed request) and confirm the response body only contains the generic message, not any Python traceback or internal details.
+
+### Result
+✅ Clients now receive a generic error message. Full exception details remain in server-side logs only.
+
+---
+
+## Fix #5 — API Key Validation at Startup
+**Date**: 2025  
+**OWASP**: A02:2021 — Cryptographic Failures  
+**Severity**: 🟠 Medium  
+**Commit**: `563448a`
+
+### What was the problem?
+`os.getenv("GROQ_API_KEY")` returns `None` silently if the secret is not set. The Groq client was initialized with `api_key=None`, the app started successfully, and only failed with a cryptic `401` error on the first query — giving no indication of the real cause.
+
+### What was changed?
+
+**`services/llm_service.py`:**
+- Added explicit validation of `GROQ_API_KEY` before initializing the Groq client:
+```python
+def __init__(self):
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY environment variable is not set. Add it to HF Secrets.")
+    self.client = Groq(api_key=api_key)
+```
+- If the key is missing, the app now fails immediately at boot with a clear, actionable error message instead of silently starting and failing later
+
+### How to verify?
+Remove `GROQ_API_KEY` from HF Secrets temporarily and redeploy — the Space logs should show the `RuntimeError` immediately on startup instead of a cryptic 401 on first query.
+
+### Result
+✅ App fails fast at startup with a clear message if `GROQ_API_KEY` is missing. Silent failures eliminated.
+
+---
+
+## Fix #6 — Timezone-Aware Datetime
+**Date**: 2025  
+**OWASP**: A04:2021 — Insecure Design  
+**Severity**: 🟡 Low  
+**Commit**: `563448a`
+
+### What was the problem?
+`datetime.utcnow()` was used to timestamp session creation. This returns a naive datetime object with no timezone info, deprecated in Python 3.12+, and can cause incorrect time comparisons or audit log inconsistencies if session expiry logic is added later.
+
+### What was changed?
+
+**`services/vector_store.py`:**
+- Updated import: `from datetime import datetime` → `from datetime import datetime, timezone`
+- Replaced `datetime.utcnow().isoformat()` with `datetime.now(timezone.utc).isoformat()`
+
+### How to verify?
+Upload a PDF and call `GET /session/{id}` — the `created_at` field in the response will now include timezone info (e.g. `2025-01-01T12:00:00+00:00` instead of `2025-01-01T12:00:00`).
+
+### Result
+✅ All session timestamps are now timezone-aware UTC.
+
+---
+
 ## Current Security Status
 
 | Finding | Description | Status |
@@ -181,12 +260,12 @@ Expected response: `"I can only answer questions about the uploaded documents."`
 | Finding 3 | No Authentication | ✅ Fixed — commit fff04e6 |
 | Finding 5 | No Rate Limiting | ✅ Fixed — commits f64d20d, f932655 |
 | Bonus | Prompt Injection | ✅ Fixed — commit 1f74234 |
+| Finding 6 | Exception Details Exposed | ✅ Fixed — commit 563448a |
+| Finding 8 | API Key Validation at Startup | ✅ Fixed — commit 563448a |
+| Finding 9 | Naive Datetime | ✅ Fixed — commit 563448a |
 | Finding 1/2 | Log Injection | 🔲 Pending |
 | Finding 4 | Wildcard CORS | 🔲 Pending |
-| Finding 6 | Exception Details Exposed | 🔲 Pending |
 | Finding 7 | Unrestricted File Upload | 🔲 Pending |
-| Finding 8 | API Key Validation at Startup | 🔲 Pending |
-| Finding 9 | Naive Datetime | 🔲 Pending |
 
 ---
 
